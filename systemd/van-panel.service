@@ -1,0 +1,15 @@
+[Unit]
+Description=Smart Traccar Panel (Flask)
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/van-panel
+ExecStart=/usr/bin/python3 /opt/van-panel/app.py
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

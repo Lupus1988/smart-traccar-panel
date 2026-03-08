@@ -1,0 +1,19 @@
+[Unit]
+Description=Van Traccar Sender (gpsd -> Traccar OsmAnd)
+After=network-online.target gpsd.socket
+Wants=network-online.target gpsd.socket
+
+[Service]
+Type=simple
+ExecStart=/opt/van-traccar/sender.py
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening (basic)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

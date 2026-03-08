@@ -1,0 +1,9 @@
+{
+  "device_id": "00000001",
+  "server_url": "https://traccar.example.com/",
+  "interval": 5,
+  "min_accuracy": 100.0,
+  "interval_stationary": 420,
+  "interval_moving": 5,
+  "movement_distance_m": 30
+}
