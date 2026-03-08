@@ -91,5 +91,5 @@ sudo systemctl status van-traccar-sender.service
 ## Version
 
 Smart Traccar Panel v1.0  
-by Norman Knittel
+by Lupus1988
 
