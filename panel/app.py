@@ -140,7 +140,7 @@ def html_page(body, title="Van Panel", refresh_seconds=None):
 
     footer = """
     <div style='margin-top:40px;text-align:center;font-size:12px;color:#6b7280'>
-        Smart Traccar Panel v1.0 · by Norman Knittel
+        Smart Traccar Panel v1.0 · by Lupus1988
     </div>
     """
 
