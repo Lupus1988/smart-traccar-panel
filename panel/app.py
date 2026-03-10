@@ -52,6 +52,15 @@ td{ padding:12px 12px; vertical-align:middle; }
   border:1px solid #243244; background:#0f1a2a; color:#e6edf3; cursor:pointer;
 }
 .btn:hover{ background:#13223a; }
+select{
+  width:100%; max-width:520px;
+  padding:10px 12px; border-radius:12px;
+  border:1px solid #263244; background:#0b1220; color:#e6edf3;
+  outline:none;
+}
+select:focus{
+  border-color:#60a5fa; box-shadow:0 0 0 4px rgba(96,165,250,.15);
+}
 input[type=password], input[type=text], input[type=number]{
   width:100%; max-width:520px;
   padding:10px 12px; border-radius:12px;
@@ -467,6 +476,7 @@ def load_hotspot_cfg():
     cfg = {
         "ssid": "traccar-hotspot",
         "psk": "",
+        "security": "open",
     }
     try:
         current = None
@@ -486,29 +496,42 @@ def load_hotspot_cfg():
                 cfg["ssid"] = v
             elif current == "wifi-security" and k == "psk":
                 cfg["psk"] = v
+            elif current == "wifi-security" and k == "key-mgmt":
+                cfg["security"] = "wpa-psk" if v == "wpa-psk" else "open"
     except Exception:
         pass
     return cfg
 
 
-def save_hotspot_cfg(ssid, psk):
+def save_hotspot_cfg(ssid, psk, security):
     path = Path("/etc/NetworkManager/system-connections/van-hotspot.nmconnection")
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
     current = None
     wifi_done = False
     sec_done = False
+    section_seen = False
 
     for line in lines:
         stripped = line.strip()
+
         if stripped.startswith("[") and stripped.endswith("]"):
             if current == "wifi" and not wifi_done:
                 out.append(f"ssid={ssid}")
                 wifi_done = True
+
             if current == "wifi-security" and not sec_done:
-                out.append(f"psk={psk}")
+                if security == "wpa-psk":
+                    out.append("key-mgmt=wpa-psk")
+                    out.append(f"psk={psk}")
                 sec_done = True
+
             current = stripped[1:-1].strip().lower()
+            if current == "wifi-security":
+                section_seen = True
+                if security == "open":
+                    continue
+
             out.append(line)
             continue
 
@@ -518,18 +541,23 @@ def save_hotspot_cfg(ssid, psk):
                 wifi_done = True
             continue
 
-        if current == "wifi-security" and stripped.startswith("psk="):
-            if not sec_done:
-                out.append(f"psk={psk}")
-                sec_done = True
-            continue
+        if current == "wifi-security":
+            if stripped.startswith("key-mgmt=") or stripped.startswith("psk=") or stripped.startswith("wep-"):
+                continue
+            if security == "open":
+                continue
 
         out.append(line)
 
     if current == "wifi" and not wifi_done:
         out.append(f"ssid={ssid}")
-    if current == "wifi-security" and not sec_done:
-        out.append(f"psk={psk}")
+
+    if security == "wpa-psk":
+        if not section_seen:
+            out.append("[wifi-security]")
+        if not sec_done:
+            out.append("key-mgmt=wpa-psk")
+            out.append(f"psk={psk}")
 
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
     run(["chmod", "600", str(path)])
@@ -811,6 +839,14 @@ def hotspot_page():
     if request.args.get("saved") == "1":
         info = "<div class='notice ok'>Hotspot-Konfiguration gespeichert.</div>"
 
+    warn_open = ""
+    if cfg.get("security") == "open":
+        warn_open = "<div class='notice err'>⚠ Setup-Hotspot ist ungesichert. Bitte Passwort setzen.</div>"
+
+    sec_open_selected = "selected" if cfg.get("security") == "open" else ""
+    sec_wpa_selected = "selected" if cfg.get("security") == "wpa-psk" else ""
+    password_hint = "leer lassen für offenen Setup-Hotspot" if cfg.get("security") == "open" else "mindestens 8 Zeichen für WPA2-PSK"
+
     body = (
         nav("hotspot")
         + "<div class='card'>"
@@ -819,11 +855,17 @@ def hotspot_page():
         + "<span class='badge'>Access Point auf wlan0 / Panel: http://10.42.0.1</span>"
         + "</div>"
         + info
+        + warn_open
         + "<form method='post' action='/hotspot/save'>"
         + "<div class='small'>SSID</div>"
         + f"<div style='margin-top:8px'><input type='text' name='ssid' value='{html.escape(cfg['ssid'])}' maxlength='32' required></div>"
-        + "<div class='small' style='margin-top:14px'>Passwort (WPA-PSK, mindestens 8 Zeichen)</div>"
-        + f"<div style='margin-top:8px'><input type='text' name='password' value='{html.escape(cfg['psk'])}' minlength='8' required></div>"
+        + "<div class='small' style='margin-top:14px'>Sicherheit</div>"
+        + "<div style='margin-top:8px'><select name='security' class='btn' style='width:100%;max-width:520px'>"
+        + f"<option value='open' {sec_open_selected}>Offen (ohne Passwort)</option>"
+        + f"<option value='wpa-psk' {sec_wpa_selected}>WPA2-PSK</option>"
+        + "</select></div>"
+        + f"<div class='small' style='margin-top:14px'>Passwort ({html.escape(password_hint)})</div>"
+        + f"<div style='margin-top:8px'><input type='text' name='password' value='{html.escape(cfg['psk'])}'></div>"
         + "<div style='margin-top:12px'><button class='btn' type='submit'>Speichern</button></div>"
         + "</form>"
         + "<div class='notice'>Hinweis: Wenn der Hotspot gerade aktiv ist, wird er mit den neuen Werten neu gestartet.</div>"
@@ -836,13 +878,16 @@ def hotspot_page():
 def hotspot_save():
     ssid = request.form.get("ssid", "").strip()
     password = request.form.get("password", "").strip()
+    security = request.form.get("security", "open").strip()
 
     if not ssid:
         return html_page(nav("hotspot") + "<div class='card'><div class='notice err'>Fehler: SSID fehlt.</div></div>", title="Hotspot"), 400
-    if len(password) < 8:
+    if security not in ("open", "wpa-psk"):
+        return html_page(nav("hotspot") + "<div class='card'><div class='notice err'>Fehler: Ungültige Sicherheitsoption.</div></div>", title="Hotspot"), 400
+    if security == "wpa-psk" and len(password) < 8:
         return html_page(nav("hotspot") + "<div class='card'><div class='notice err'>Fehler: Passwort muss mindestens 8 Zeichen lang sein.</div></div>", title="Hotspot"), 400
 
-    save_hotspot_cfg(ssid, password)
+    save_hotspot_cfg(ssid, password, security)
     return redirect("/hotspot?saved=1")
 
 
