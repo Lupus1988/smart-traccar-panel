@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="https://github.com/<USER>/smart-traccar-panel"
+REPO_URL="https://github.com/Lupus1988/smart-traccar-panel.git"
 TMP_DIR="/tmp/smart-traccar-install"
 
 echo "======================================"
@@ -74,12 +74,17 @@ echo
 echo "Installing systemd services..."
 install -m 644 systemd/van-panel.service /etc/systemd/system/van-panel.service
 install -m 644 systemd/van-traccar-sender.service /etc/systemd/system/van-traccar-sender.service
+install -m 755 systemd/van-wifi-autofallback.sh /usr/local/sbin/van-wifi-autofallback.sh
+install -m 644 systemd/van-wifi-autofallback.service /etc/systemd/system/van-wifi-autofallback.service
+install -m 644 systemd/van-wifi-autofallback.timer /etc/systemd/system/van-wifi-autofallback.timer
 
 systemctl daemon-reload
-systemctl enable van-panel.service van-traccar-sender.service
+systemctl enable van-panel.service van-traccar-sender.service van-wifi-autofallback.timer
 
 echo
 echo "Installing hotspot profile..."
+nmcli connection delete van-hotspot >/dev/null 2>&1 || true
+rm -f /etc/NetworkManager/system-connections/van-hotspot.nmconnection
 install -m 600 networkmanager/van-hotspot.nmconnection /etc/NetworkManager/system-connections/van-hotspot.nmconnection
 
 echo

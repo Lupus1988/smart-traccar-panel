@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Van WiFi Auto-Fallback periodically
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=20
+Unit=van-wifi-autofallback.service
+
+[Install]
+WantedBy=timers.target

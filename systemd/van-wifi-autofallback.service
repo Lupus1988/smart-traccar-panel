@@ -1,0 +1,8 @@
+[Unit]
+Description=Van WiFi Auto-Fallback (enable hotspot if no WiFi)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/van-wifi-autofallback.sh

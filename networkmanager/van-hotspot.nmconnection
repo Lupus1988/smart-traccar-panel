@@ -2,14 +2,11 @@
 id=van-hotspot
 type=wifi
 interface-name=wlan0
-autoconnect=false
 
 [wifi]
+band=bg
 mode=ap
 ssid=traccar-hotspot
-
-[wifi-security]
-key-mgmt=none
 
 [ipv4]
 method=shared
