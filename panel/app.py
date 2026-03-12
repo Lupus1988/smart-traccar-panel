@@ -1,10 +1,13 @@
+import base64
 import html
+import io
 import json
 import subprocess
 import time
 from pathlib import Path
 from urllib.parse import quote, unquote
 
+import qrcode
 from flask import Flask, request, redirect
 
 app = Flask(__name__)
@@ -12,6 +15,9 @@ app = Flask(__name__)
 CONFIG_TRACCAR = "/opt/van-traccar/config.json"
 STATE_TRACCAR = "/opt/van-traccar/status.json"
 QUEUE_TRACCAR = "/opt/van-traccar/queue.json"
+WG_CONF = "/etc/wireguard/wg0.conf"
+WG_CLIENTS_DIR = "/etc/wireguard/clients"
+WG_SERVER_PUBLIC_KEY = "hDDeIc+a+UlNirJxZ+J8CGIViAXp8yZPyq5Et5JmVEM="
 
 CSS = """
 <style>
@@ -594,7 +600,6 @@ def sender_manual_send():
     return r.returncode == 0, (r.stderr or r.stdout or "").strip()
 
 
-WG_CONF = "/etc/wireguard/wg0.conf"
 
 
 def wg_control(action):
