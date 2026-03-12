@@ -620,7 +620,7 @@ def save_wg_raw(text):
 
 def wg_generate_keypair():
     priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True, check=True).stdout.strip()
-    pub = subprocess.run(["bash", "-lc", f"printf '%s' {quote(priv)} | wg pubkey"], capture_output=True, text=True, check=True).stdout.strip()
+    pub = subprocess.run(["wg", "pubkey"], input=priv + "\n", capture_output=True, text=True, check=True).stdout.strip()
     return {"private": priv, "public": pub}
 
 
