@@ -150,7 +150,7 @@ label{ display:block; font-size:13px; color:#cbd5e1; margin-top:14px; margin-bot
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
-def html_page(body, title="Van Panel", refresh_seconds=None):
+def html_page(body, title="Traccar Client Panel", refresh_seconds=None):
     refresh = f"<meta http-equiv='refresh' content='{int(refresh_seconds)}'>" if refresh_seconds else ""
 
     footer = """
@@ -1000,7 +1000,7 @@ def traccar():
         + "<div class='card'>"
         + "<div class='header'><h1 class='h1'>Traccar Client</h1>"
         + "<span class='badge'>WLAN-only (soll nicht im Hotspot genutzt werden)</span></div>"
-        + "<p class='small'>Einstellungen für den Van-Sender. Änderungen werden in <span class='mono'>/opt/van-traccar/config.json</span> gespeichert.</p>"
+        + "<p class='small'>Einstellungen für den Traccar Client Sender. Änderungen werden in <span class='mono'>/opt/van-traccar/config.json</span> gespeichert.</p>"
         + "<div class='hr'></div>"
         + "<div class='grid'>"
         + f"<div class='card kpi'><p class='title'>Fix</p><p class='value'>{html.escape(str(gps['fix']))}</p></div>"

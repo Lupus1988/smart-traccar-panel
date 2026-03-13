@@ -1,19 +1,40 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -u
 
+LOG="/var/log/van-wifi-autofallback.log"
 WIFI_IF="wlan0"
 HOTSPOT_CONN="van-hotspot"
 
-current_conn="$(nmcli -t -f DEVICE,CONNECTION device status | awk -F: -v d="$WIFI_IF" '$1==d {print $2; exit}')"
-wifi_state="$(nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: -v d="$WIFI_IF" '$1==d && $2=="wifi" {print $3; exit}')"
+ts() { date '+%F %T'; }
 
-if [ "$current_conn" = "$HOTSPOT_CONN" ]; then
-  exit 0
-fi
+{
+  echo "[$(ts)] --- run ---"
+  echo "[$(ts)] nmcli device:"
+  nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status || true
+  echo "[$(ts)] nmcli active:"
+  nmcli -t -f NAME,TYPE,DEVICE connection show --active || true
 
-if [ "$wifi_state" = "connected" ] && [ "$current_conn" != "--" ] && [ -n "$current_conn" ]; then
-  nmcli connection down "$HOTSPOT_CONN" >/dev/null 2>&1 || true
-  exit 0
-fi
+  current_conn="$(nmcli -t -f DEVICE,CONNECTION device status | awk -F: -v d="$WIFI_IF" '$1==d {print $2; exit}')"
+  wifi_state="$(nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: -v d="$WIFI_IF" '$1==d && $2=="wifi" {print $3; exit}')"
 
-nmcli connection up "$HOTSPOT_CONN" >/dev/null 2>&1 || true
+  echo "[$(ts)] current_conn=$current_conn"
+  echo "[$(ts)] wifi_state=$wifi_state"
+
+  if [ "$current_conn" = "$HOTSPOT_CONN" ]; then
+    echo "[$(ts)] hotspot already active -> exit"
+    exit 0
+  fi
+
+  if [ "$wifi_state" = "connected" ] && [ "$current_conn" != "--" ] && [ -n "$current_conn" ]; then
+    echo "[$(ts)] wifi connected -> ensure hotspot down"
+    nmcli connection down "$HOTSPOT_CONN" >/dev/null 2>&1 || true
+    exit 0
+  fi
+
+  echo "[$(ts)] wifi not connected -> try hotspot up"
+  nmcli connection up "$HOTSPOT_CONN" || true
+
+  echo "[$(ts)] after hotspot up:"
+  nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status || true
+  nmcli -t -f NAME,TYPE,DEVICE connection show --active || true
+} >> "$LOG" 2>&1

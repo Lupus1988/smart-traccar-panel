@@ -2,7 +2,7 @@
 Description=Run Van WiFi Auto-Fallback periodically
 
 [Timer]
-OnBootSec=15
+OnBootSec=60
 OnUnitActiveSec=20
 Unit=van-wifi-autofallback.service
 
