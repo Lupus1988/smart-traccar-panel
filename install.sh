@@ -19,6 +19,9 @@ apt update
 apt install -y \
   git \
   gpsd \
+  nginx \
+  openresolv \
+  python3-gunicorn \
   python3-gps \
   python3-requests \
   python3-flask \
@@ -31,6 +34,7 @@ if [ -f "$SCRIPT_DIR/panel/app.py" ] && \
    [ -f "$SCRIPT_DIR/traccar/sender.py" ] && \
    [ -f "$SCRIPT_DIR/traccar/send_test.py" ] && \
    [ -f "$SCRIPT_DIR/traccar/config.json.example" ] && \
+   [ -f "$SCRIPT_DIR/nginx/van-panel" ] && \
    [ -f "$SCRIPT_DIR/systemd/van-panel.service" ] && \
    [ -f "$SCRIPT_DIR/systemd/van-traccar-sender.service" ] && \
    [ -f "$SCRIPT_DIR/networkmanager/van-hotspot.nmconnection" ]; then
@@ -78,8 +82,16 @@ install -m 755 systemd/van-wifi-autofallback.sh /usr/local/sbin/van-wifi-autofal
 install -m 644 systemd/van-wifi-autofallback.service /etc/systemd/system/van-wifi-autofallback.service
 install -m 644 systemd/van-wifi-autofallback.timer /etc/systemd/system/van-wifi-autofallback.timer
 
+echo
+echo "Installing nginx reverse proxy..."
+install -d -m 755 /etc/nginx/sites-available /etc/nginx/sites-enabled
+install -m 644 nginx/van-panel /etc/nginx/sites-available/van-panel
+ln -sfn /etc/nginx/sites-available/van-panel /etc/nginx/sites-enabled/van-panel
+rm -f /etc/nginx/sites-enabled/default
+
 systemctl daemon-reload
-systemctl enable van-panel.service van-traccar-sender.service van-wifi-autofallback.timer
+systemctl enable nginx.service van-panel.service van-traccar-sender.service van-wifi-autofallback.timer
+systemctl disable --now van-panel-gunicorn.service >/dev/null 2>&1 || true
 
 echo
 echo "Installing hotspot profile..."
@@ -90,6 +102,10 @@ install -m 600 networkmanager/van-hotspot.nmconnection /etc/NetworkManager/syste
 echo
 echo "Restarting NetworkManager..."
 systemctl restart NetworkManager
+
+echo
+echo "Reloading nginx..."
+systemctl restart nginx.service
 
 echo
 echo "Starting services..."

@@ -1,23 +1,33 @@
-import base64
 import html
-import io
 import json
+import os
+import secrets
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-import qrcode
-from flask import Flask, request, redirect
+from flask import Flask, request, redirect, session, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 CONFIG_TRACCAR = "/opt/van-traccar/config.json"
 STATE_TRACCAR = "/opt/van-traccar/status.json"
 QUEUE_TRACCAR = "/opt/van-traccar/queue.json"
 WG_CONF = "/etc/wireguard/wg0.conf"
-WG_CLIENTS_DIR = "/etc/wireguard/clients"
-WG_SERVER_PUBLIC_KEY = "hDDeIc+a+UlNirJxZ+J8CGIViAXp8yZPyq5Et5JmVEM="
+AUTH_FILE = Path("/opt/van-panel/auth.json")
+SECRET_FILE = Path("/opt/van-panel/secret.key")
+AUDIT_LOG_FILE = Path("/opt/van-panel/audit.log")
+
+SESSION_TIMEOUT_MINUTES = 20
+RESET_PIN_MAX_ATTEMPTS = 5
+RESET_PIN_LOCK_SECONDS = 900
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCK_SECONDS = 600
 
 CSS = """
 <style>
@@ -147,6 +157,151 @@ label{ display:block; font-size:13px; color:#cbd5e1; margin-top:14px; margin-bot
 </style>
 """
 
+
+def load_json(path, default):
+    try:
+        if not path.exists():
+            return default
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    tmp.replace(path)
+
+
+def load_or_create_secret_key():
+    if SECRET_FILE.exists():
+        try:
+            return SECRET_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    secret_key = secrets.token_hex(32)
+    SECRET_FILE.write_text(secret_key, encoding="utf-8")
+    try:
+        SECRET_FILE.chmod(0o600)
+    except Exception:
+        pass
+    return secret_key
+
+
+def load_auth():
+    data = load_json(AUTH_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_auth(data):
+    save_json(AUTH_FILE, data)
+    try:
+        AUTH_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def is_auth_configured():
+    data = load_auth()
+    return bool(data.get("username") and data.get("password_hash") and data.get("reset_pin_hash"))
+
+
+def write_audit_log(message):
+    AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with AUDIT_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"{timestamp} {message}\n")
+    try:
+        AUDIT_LOG_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def init_auth_defaults():
+    data = load_auth()
+    changed = False
+    defaults = {
+        "username": "",
+        "password_hash": "",
+        "reset_pin_hash": "",
+        "failed_reset_attempts": 0,
+        "reset_locked_until": 0,
+        "failed_login_attempts": 0,
+        "login_locked_until": 0,
+        "created_at": "",
+        "updated_at": "",
+    }
+    for key, value in defaults.items():
+        if key not in data:
+            data[key] = value
+            changed = True
+    if changed:
+        save_auth(data)
+
+
+def is_session_valid():
+    if not session.get("logged_in"):
+        return False
+
+    last_seen = session.get("last_seen", 0)
+    now = int(time.time())
+
+    if not isinstance(last_seen, int):
+        try:
+            last_seen = int(last_seen)
+        except Exception:
+            last_seen = 0
+
+    if now - last_seen > SESSION_TIMEOUT_MINUTES * 60:
+        session.clear()
+        return False
+
+    session["last_seen"] = now
+    session.permanent = False
+    return True
+
+
+@app.before_request
+def enforce_auth():
+    open_paths = {"/login", "/setup", "/reset-access", "/factory-reset"}
+    path_req = request.path or "/"
+
+    if path_req.startswith("/static"):
+        return
+
+    if not is_auth_configured():
+        if path_req != "/setup":
+            return redirect(url_for("setup"), code=303)
+        return
+
+    if path_req in open_paths:
+        return
+
+    if not is_session_valid():
+        return redirect(url_for("login"), code=303)
+
+
+@app.after_request
+def apply_security_headers(response):
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self' 'unsafe-inline' data: blob:; "
+        "img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "form-action 'self'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'"
+    )
+    return response
+
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
@@ -166,6 +321,21 @@ def html_page(body, title="Traccar Client Panel", refresh_seconds=None):
         f"<body><div class='container'>{body}{footer}</div></body></html>"
     )
 
+
+def public_page(body, title="Traccar Client Panel"):
+    footer = """
+    <div style='margin-top:40px;text-align:center;font-size:12px;color:#6b7280'>
+        Smart Traccar Panel v1.0 · by Lupus1988
+    </div>
+    """
+    wrapped = "<div class='card' style='max-width:640px;margin:40px auto 0 auto'>" + body + "</div>"
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"{CSS}<title>{html.escape(title)}</title></head>"
+        f"<body><div class='container'>{wrapped}{footer}</div></body></html>"
+    )
+
 def nav(active):
     def a(href, label, key):
         cls = "active" if active == key else ""
@@ -177,6 +347,7 @@ def nav(active):
         + a("/status", "Status", "status")
         + a("/traccar", "Traccar Client", "traccar")
         + a("/wg", "WG-VPN", "wg")
+        + a("/logout", "Logout", "logout")
         + "</div>"
     )
 
@@ -246,7 +417,7 @@ def save_traccar_cfg(cfg):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
-    subprocess.run(["sudo", "mv", tmp, CONFIG_TRACCAR], check=False)
+    subprocess.run(["mv", tmp, CONFIG_TRACCAR], check=False)
 
 
 
@@ -779,6 +950,314 @@ def wg_latest_handshake():
 
     return info
 
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    if is_auth_configured():
+        return redirect(url_for("login"), code=303)
+
+    error = ""
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        password2 = request.form.get("password2") or ""
+        reset_pin = (request.form.get("reset_pin") or "").strip()
+
+        if not username or not password or not password2 or not reset_pin:
+            error = "Bitte alle Felder ausfüllen."
+        elif password != password2:
+            error = "Die Passwörter stimmen nicht überein."
+        elif len(password) < 8:
+            error = "Das Passwort muss mindestens 8 Zeichen lang sein."
+        elif len(reset_pin) < 4:
+            error = "Die Reset-PIN muss mindestens 4 Zeichen lang sein."
+        else:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            data = load_auth()
+            data["username"] = username
+            data["password_hash"] = generate_password_hash(password)
+            data["reset_pin_hash"] = generate_password_hash(reset_pin)
+            data["failed_reset_attempts"] = 0
+            data["reset_locked_until"] = 0
+            data["failed_login_attempts"] = 0
+            data["login_locked_until"] = 0
+            data["created_at"] = now_str
+            data["updated_at"] = now_str
+            save_auth(data)
+            write_audit_log(f"{username} completed initial panel setup")
+            return redirect(url_for("login"), code=303)
+
+    body = (
+        "<h1 class='h1'>Panel-Ersteinrichtung</h1>"
+        "<p class='small'>Es ist noch kein Panel-Zugang eingerichtet.</p>"
+        "<form method='post'>"
+        "<label>Benutzername</label>"
+        "<input type='text' name='username' required>"
+        "<label>Passwort</label>"
+        "<input type='password' name='password' required>"
+        "<label>Passwort wiederholen</label>"
+        "<input type='password' name='password2' required>"
+        "<label>Reset-PIN</label>"
+        "<input type='password' name='reset_pin' required>"
+        "<div class='notice'>Die Reset-PIN wird benötigt, um den Panel-Zugang zurückzusetzen. Traccar-, WLAN-, Hotspot- und WireGuard-Konfigurationen bleiben dabei erhalten.</div>"
+        "<div class='small'>Die Sitzung läuft nach 20 Minuten Inaktivität automatisch ab.</div>"
+        "<div style='margin-top:12px'><button class='btn' type='submit'>Einrichtung abschließen</button></div>"
+        + (f"<div class='notice err'>{html.escape(error)}</div>" if error else "")
+        + "</form>"
+    )
+    return public_page(body, title="Panel-Ersteinrichtung")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not is_auth_configured():
+        return redirect(url_for("setup"), code=303)
+
+    if is_session_valid():
+        return redirect(url_for("status_page"), code=303)
+
+    error = ""
+    info = ""
+    auth = load_auth()
+    now_ts = int(time.time())
+    locked_until = int(auth.get("login_locked_until", 0) or 0)
+
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+
+        if locked_until > now_ts:
+            remaining = locked_until - now_ts
+            minutes = max(1, (remaining + 59) // 60)
+            info = f"Login ist aktuell gesperrt. Erneut versuchen in ca. {minutes} Minute(n)."
+        elif not username or not password:
+            error = "Bitte Benutzername und Passwort eingeben."
+        elif username == auth.get("username") and check_password_hash(auth.get("password_hash", ""), password):
+            auth["failed_login_attempts"] = 0
+            auth["login_locked_until"] = 0
+            save_auth(auth)
+
+            session.clear()
+            session["logged_in"] = True
+            session["username"] = username
+            session["last_seen"] = int(time.time())
+            session.permanent = False
+            write_audit_log(f"{username} logged in")
+            return redirect(url_for("status_page"), code=303)
+        else:
+            attempts = int(auth.get("failed_login_attempts", 0) or 0) + 1
+            auth["failed_login_attempts"] = attempts
+
+            if attempts >= LOGIN_MAX_ATTEMPTS:
+                auth["login_locked_until"] = now_ts + LOGIN_LOCK_SECONDS
+                auth["failed_login_attempts"] = 0
+                save_auth(auth)
+                write_audit_log(f"login locked after too many invalid attempts for username={username or 'empty'}")
+            else:
+                save_auth(auth)
+                write_audit_log(f"invalid login attempt for username={username or 'empty'}")
+                error = f"Ungültiger Benutzername oder Passwort. Verbleibende Versuche: {LOGIN_MAX_ATTEMPTS - attempts}"
+
+        auth = load_auth()
+        locked_until = int(auth.get("login_locked_until", 0) or 0)
+
+    if locked_until > now_ts and not info:
+        remaining = locked_until - now_ts
+        minutes = max(1, (remaining + 59) // 60)
+        info = f"Login ist aktuell gesperrt. Erneut versuchen in ca. {minutes} Minute(n)."
+
+    body = (
+        "<h1 class='h1'>Login</h1>"
+        "<form method='post'>"
+        "<label>Benutzername</label>"
+        "<input type='text' name='username' required>"
+        "<label>Passwort</label>"
+        "<input type='password' name='password' required>"
+        "<div class='small'>Die Sitzung läuft nach 20 Minuten Inaktivität automatisch ab.</div>"
+        "<div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>"
+        "<button class='btn' type='submit'>Anmelden</button>"
+        "<a class='btn' href='/reset-access'>Zugang zurücksetzen</a>"
+        "</div>"
+        + (f"<div class='notice'>{html.escape(info)}</div>" if info else "")
+        + (f"<div class='notice err'>{html.escape(error)}</div>" if error else "")
+        + "</form>"
+    )
+    return public_page(body, title="Login")
+
+
+@app.route("/logout")
+def logout():
+    username = session.get("username", "unknown")
+    session.clear()
+    write_audit_log(f"{username} logged out")
+    return redirect(url_for("login"), code=303)
+
+
+@app.route("/reset-access", methods=["GET", "POST"])
+def reset_access():
+    if not is_auth_configured():
+        return redirect(url_for("setup"), code=303)
+
+    error = ""
+    info = ""
+    warning = ""
+    auth = load_auth()
+    now_ts = int(time.time())
+    locked_until = int(auth.get("reset_locked_until", 0) or 0)
+    failed_attempts = int(auth.get("failed_reset_attempts", 0) or 0)
+    show_factory_reset = failed_attempts >= 3 or locked_until > now_ts
+
+    if request.method == "POST":
+        reset_pin = (request.form.get("reset_pin") or "").strip()
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        password2 = request.form.get("password2") or ""
+
+        if locked_until > now_ts:
+            remaining = locked_until - now_ts
+            minutes = max(1, (remaining + 59) // 60)
+            info = f"Reset-Zugang ist aktuell gesperrt. Erneut versuchen in ca. {minutes} Minute(n)."
+        elif not reset_pin or not username or not password or not password2:
+            error = "Bitte alle Felder ausfüllen."
+        elif password != password2:
+            error = "Die Passwörter stimmen nicht überein."
+        elif len(password) < 8:
+            error = "Das Passwort muss mindestens 8 Zeichen lang sein."
+        elif len(reset_pin) < 4:
+            error = "Die Reset-PIN ist ungültig."
+        elif not check_password_hash(auth.get("reset_pin_hash", ""), reset_pin):
+            attempts = int(auth.get("failed_reset_attempts", 0) or 0) + 1
+            auth["failed_reset_attempts"] = attempts
+            show_factory_reset = attempts >= 3
+
+            if attempts >= RESET_PIN_MAX_ATTEMPTS:
+                auth["reset_locked_until"] = now_ts + RESET_PIN_LOCK_SECONDS
+                auth["failed_reset_attempts"] = 0
+                save_auth(auth)
+                write_audit_log("reset access locked after too many invalid reset PIN attempts")
+                remaining = RESET_PIN_LOCK_SECONDS
+                minutes = max(1, (remaining + 59) // 60)
+                info = f"Reset-Zugang ist aktuell gesperrt. Erneut versuchen in ca. {minutes} Minute(n)."
+            else:
+                save_auth(auth)
+                write_audit_log("invalid reset PIN attempt")
+                error = f"Ungültige Reset-PIN. Verbleibende Versuche: {RESET_PIN_MAX_ATTEMPTS - attempts}"
+
+            if show_factory_reset:
+                warning = "Die Reset-PIN wurde mehrfach falsch eingegeben. Falls die PIN nicht mehr bekannt ist, kann ein Werksreset durchgeführt werden. Dabei werden nur die Panel-Zugangsdaten gelöscht. Traccar-, WLAN-, Hotspot- und WireGuard-Konfigurationen bleiben erhalten."
+        else:
+            auth["username"] = username
+            auth["password_hash"] = generate_password_hash(password)
+            auth["failed_reset_attempts"] = 0
+            auth["reset_locked_until"] = 0
+            auth["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_auth(auth)
+            session.clear()
+            write_audit_log(f"{username} reset panel access via reset PIN")
+            return redirect(url_for("login"), code=303)
+
+        auth = load_auth()
+        locked_until = int(auth.get("reset_locked_until", 0) or 0)
+        failed_attempts = int(auth.get("failed_reset_attempts", 0) or 0)
+        show_factory_reset = show_factory_reset or failed_attempts >= 3
+
+    if locked_until > now_ts and not info:
+        remaining = locked_until - now_ts
+        minutes = max(1, (remaining + 59) // 60)
+        info = f"Reset-Zugang ist aktuell gesperrt. Erneut versuchen in ca. {minutes} Minute(n)."
+
+    if show_factory_reset and not warning:
+        warning = "Die Reset-PIN wurde mehrfach falsch eingegeben. Falls die PIN nicht mehr bekannt ist, kann ein Werksreset durchgeführt werden. Dabei werden nur die Panel-Zugangsdaten gelöscht. Traccar-, WLAN-, Hotspot- und WireGuard-Konfigurationen bleiben erhalten."
+
+    factory_reset_html = ""
+    if show_factory_reset:
+        factory_reset_html = (
+            "<div class='notice err'>"
+            + html.escape(warning)
+            + "<div style='margin-top:12px'><a class='btn' href='/factory-reset'>Werksreset</a></div>"
+            + "</div>"
+        )
+
+    body = (
+        "<h1 class='h1'>Zugang zurücksetzen</h1>"
+        "<p class='small'>Mit der Reset-PIN können Benutzername und Passwort des Panels zurückgesetzt werden.</p>"
+        "<form method='post'>"
+        "<label>Reset-PIN</label>"
+        "<input type='password' name='reset_pin' required>"
+        "<label>Neuer Benutzername</label>"
+        "<input type='text' name='username' required>"
+        "<label>Neues Passwort</label>"
+        "<input type='password' name='password' required>"
+        "<label>Neues Passwort wiederholen</label>"
+        "<input type='password' name='password2' required>"
+        "<div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>"
+        "<button class='btn' type='submit'>Zugang zurücksetzen</button>"
+        "<a class='btn' href='/login'>Zurück</a>"
+        "</div>"
+        + (f"<div class='notice'>{html.escape(info)}</div>" if info else "")
+        + (f"<div class='notice err'>{html.escape(error)}</div>" if error else "")
+        + factory_reset_html
+        + "</form>"
+    )
+    return public_page(body, title="Zugang zurücksetzen")
+
+
+@app.route("/factory-reset", methods=["GET", "POST"])
+def factory_reset():
+    if not is_auth_configured():
+        return redirect(url_for("setup"), code=303)
+
+    auth = load_auth()
+    failed_attempts = int(auth.get("failed_reset_attempts", 0) or 0)
+    locked_until = int(auth.get("reset_locked_until", 0) or 0)
+    now_ts = int(time.time())
+
+    if failed_attempts < 3 and locked_until <= now_ts:
+        return redirect(url_for("reset_access"), code=303)
+
+    confirm_text = "WERKSRESET"
+    error = ""
+
+    if request.method == "POST":
+        entered = (request.form.get("confirm_text") or "").strip()
+        if entered != confirm_text:
+            error = "Bestätigungstext stimmt nicht überein."
+        else:
+            try:
+                if AUTH_FILE.exists():
+                    AUTH_FILE.unlink()
+            except Exception:
+                pass
+
+            try:
+                if SECRET_FILE.exists():
+                    SECRET_FILE.unlink()
+            except Exception:
+                pass
+
+            session.clear()
+            return redirect(url_for("setup"), code=303)
+
+    body = (
+        "<h1 class='h1'>Werksreset</h1>"
+        "<div class='notice err'>"
+        "Achtung: Beim Werksreset werden die Zugangsdaten des Panels gelöscht. "
+        "Traccar-, WLAN-, Hotspot- und WireGuard-Konfigurationen bleiben erhalten."
+        "</div>"
+        "<p class='small'>Gib zur Bestätigung exakt folgenden Text ein:</p>"
+        f"<div class='notice mono'>{confirm_text}</div>"
+        "<form method='post'>"
+        "<label>Bestätigung</label>"
+        "<input type='text' name='confirm_text' required>"
+        "<div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>"
+        "<button class='btn' type='submit'>Werksreset ausführen</button>"
+        "<a class='btn' href='/reset-access'>Abbrechen</a>"
+        "</div>"
+        + (f"<div class='notice err'>{html.escape(error)}</div>" if error else "")
+        + "</form>"
+    )
+    return public_page(body, title="Werksreset")
+
 @app.route("/")
 def index():
     nets = scan_wifi()
@@ -820,7 +1299,7 @@ def index():
     )
 
     body = (
-        nav("status")
+        nav("wifi")
         + status_box
         + "<div class='card'>"
         + "<div class='header'>"
@@ -1479,6 +1958,10 @@ def wg_control_route():
     return redirect("/wg?saved=ctl")
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80)
+app.secret_key = load_or_create_secret_key()
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+init_auth_defaults()
 
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))

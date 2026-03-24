@@ -72,6 +72,9 @@ Der Installer installiert automatisch:
 
 - git
 - gpsd
+- nginx
+- openresolv
+- python3-gunicorn
 - python3-gps
 - python3-requests
 - python3-flask
@@ -92,4 +95,3 @@ sudo systemctl status van-traccar-sender.service
 
 Smart Traccar Panel v1.0  
 by Lupus1988
-

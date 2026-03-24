@@ -1,15 +1,25 @@
 [Unit]
-Description=Smart Traccar Panel (Flask)
-After=network-online.target NetworkManager.service
+Description=Smart Traccar Panel (Gunicorn)
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/van-panel
-ExecStart=/usr/bin/python3 /opt/van-panel/app.py
+ExecStart=/usr/bin/python3 -m gunicorn.app.wsgiapp --workers 2 --threads 4 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - app:app
 Restart=always
 RestartSec=2
 User=root
+Environment=PYTHONUNBUFFERED=1
+
+# The panel needs elevated rights for nmcli, systemctl and WireGuard config
+# changes, but it should still avoid the Flask development server.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target
