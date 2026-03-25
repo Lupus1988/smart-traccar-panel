@@ -330,5 +330,23 @@ def send_current_position_once():
     return False
 
 
+def send_test_position_once():
+    cfg = load_config()
+    lat = 90.0
+    lon = 0.0
+    accuracy = 1.0
+    send_position(
+        cfg,
+        lat,
+        lon,
+        accuracy,
+        tracking_mode="Testkoordinaten",
+        active_interval=None,
+        movement_distance_m=None,
+        event="test-north-pole",
+    )
+    return True
+
+
 if __name__ == "__main__":
     main()

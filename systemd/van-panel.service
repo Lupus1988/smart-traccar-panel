@@ -6,11 +6,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/van-panel
+RuntimeDirectory=van-panel
 ExecStart=/usr/bin/python3 -m gunicorn.app.wsgiapp --workers 2 --threads 4 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - app:app
 Restart=always
 RestartSec=2
 User=root
 Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/run/van-panel
 
 # The panel needs elevated rights for nmcli, systemctl and WireGuard config
 # changes, but it should still avoid the Flask development server.

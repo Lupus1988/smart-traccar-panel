@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore WireGuard VPN client after boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/van-vpn-restore.sh
+User=root
+
+[Install]
+WantedBy=multi-user.target

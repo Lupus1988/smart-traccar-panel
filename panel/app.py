@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from flask import Flask, request, redirect, session, url_for
+from flask import Flask, request, redirect, session, url_for, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
@@ -22,6 +22,7 @@ WG_CONF = "/etc/wireguard/wg0.conf"
 AUTH_FILE = Path("/opt/van-panel/auth.json")
 SECRET_FILE = Path("/opt/van-panel/secret.key")
 AUDIT_LOG_FILE = Path("/opt/van-panel/audit.log")
+VPN_POLICY_FILE = Path("/opt/van-panel/vpn-policy.json")
 
 SESSION_TIMEOUT_MINUTES = 20
 RESET_PIN_MAX_ATTEMPTS = 5
@@ -155,6 +156,78 @@ label{ display:block; font-size:13px; color:#cbd5e1; margin-top:14px; margin-bot
 .kpi .title{ font-size:12px; color:#9aa4b2; margin:0; }
 .kpi .value{ font-size:16px; font-weight:700; margin:6px 0 0; }
 </style>
+"""
+
+JS = """
+<script>
+async function refreshSmartVanStatus(){
+  const root = document.querySelector('[data-live-status-root]');
+  if(!root){
+    return;
+  }
+
+  try{
+    const response = await fetch('/api/status', {cache: 'no-store'});
+    if(!response.ok){
+      return;
+    }
+    const data = await response.json();
+
+    const setText = function(id, value){
+      const el = document.getElementById(id);
+      if(el){
+        el.textContent = (value === null || value === undefined || value === '') ? '-' : String(value);
+      }
+    };
+
+    setText('live-wifi-state', data.wifi_connected ? 'verbunden' : 'nicht verbunden');
+    setText('live-hotspot-state', data.hotspot_active ? 'aktiv' : 'inaktiv');
+    setText('live-internet-state', data.internet_ok ? 'ok' : 'kein Internet');
+    setText('live-sender-state', data.sender_state || '-');
+    setText('live-vpn-state', data.vpn_state || '-');
+    setText('live-vpn-rx', data.wg_rx_human || '-');
+    setText('live-vpn-tx', data.wg_tx_human || '-');
+    setText('live-vpn-rx-copy', data.wg_rx_human || '-');
+    setText('live-vpn-tx-copy', data.wg_tx_human || '-');
+    setText('live-vpn-handshake-age', data.wg_handshake_age || '-');
+    setText('live-vpn-handshake-status', data.wg_handshake_status || '-');
+    setText('live-endpoint-host', data.endpoint_host || '-');
+    setText('live-endpoint-resolved', data.endpoint_resolved || '-');
+    setText('live-queue-size', data.queue_size || '0');
+    setText('live-last-send', data.last_send_utc || '-');
+    setText('live-last-position', data.last_position || '-');
+    setText('live-http-status', data.last_http_code || '-');
+    setText('live-last-error', data.last_error || '-');
+    setText('live-gps-fix', data.gps_fix || '-');
+    setText('live-gps-lat', data.gps_lat || '-');
+    setText('live-gps-lon', data.gps_lon || '-');
+    setText('live-gps-accuracy', data.gps_accuracy || '-');
+    setText('live-gps-signal', data.gps_signal || '-');
+    setText('live-gps-satellites', data.gps_satellites || '-');
+    setText('live-gps-watchdog', data.gps_watchdog_status || '-');
+    setText('live-gps-watchdog-age', data.gps_watchdog_age || '-');
+    setText('live-gps-devices', data.gps_devices_summary || '-');
+    setText('live-traccar-fix', data.gps_fix || '-');
+    setText('live-traccar-last', data.gps_last || '-');
+    setText('live-traccar-lat', data.gps_lat || '-');
+    setText('live-traccar-lon', data.gps_lon || '-');
+    setText('live-traccar-acc', data.gps_accuracy || '-');
+    setText('live-traccar-devices', data.gps_devices_summary || '-');
+    setText('live-cpu-temp', data.health_cpu_temp || '-');
+    setText('live-load', data.health_load || '-');
+    setText('live-ram', data.health_ram || '-');
+    setText('live-uptime', data.health_uptime || '-');
+  }catch(e){
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  if(document.querySelector('[data-live-status-root]')){
+    refreshSmartVanStatus();
+    window.setInterval(refreshSmartVanStatus, 2000);
+  }
+});
+</script>
 """
 
 
@@ -306,8 +379,6 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 def html_page(body, title="Traccar Client Panel", refresh_seconds=None):
-    refresh = f"<meta http-equiv='refresh' content='{int(refresh_seconds)}'>" if refresh_seconds else ""
-
     footer = """
     <div style='margin-top:40px;text-align:center;font-size:12px;color:#6b7280'>
         Smart Traccar Panel v1.0 · by Lupus1988
@@ -317,7 +388,7 @@ def html_page(body, title="Traccar Client Panel", refresh_seconds=None):
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"{refresh}{CSS}<title>{html.escape(title)}</title></head>"
+        f"{CSS}{JS}<title>{html.escape(title)}</title></head>"
         f"<body><div class='container'>{body}{footer}</div></body></html>"
     )
 
@@ -332,7 +403,7 @@ def public_page(body, title="Traccar Client Panel"):
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"{CSS}<title>{html.escape(title)}</title></head>"
+        f"{CSS}{JS}<title>{html.escape(title)}</title></head>"
         f"<body><div class='container'>{wrapped}{footer}</div></body></html>"
     )
 
@@ -418,6 +489,47 @@ def save_traccar_cfg(cfg):
         json.dump(data, f, indent=2)
         f.write("\n")
     subprocess.run(["mv", tmp, CONFIG_TRACCAR], check=False)
+
+
+def load_vpn_policy():
+    data = load_json(VPN_POLICY_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "remember_last_state": bool(data.get("remember_last_state", False)),
+        "last_online": bool(data.get("last_online", False)),
+        "last_handshake_status": str(data.get("last_handshake_status", "")).strip(),
+        "updated_at": str(data.get("updated_at", "")).strip(),
+    }
+
+
+def save_vpn_policy(policy):
+    data = {
+        "remember_last_state": bool(policy.get("remember_last_state", False)),
+        "last_online": bool(policy.get("last_online", False)),
+        "last_handshake_status": str(policy.get("last_handshake_status", "")).strip(),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    save_json(VPN_POLICY_FILE, data)
+
+
+def detect_serial_gps_devices():
+    patterns = [
+        "/dev/serial/by-id/*",
+        "/dev/ttyUSB*",
+        "/dev/ttyACM*",
+        "/dev/serial0",
+    ]
+    devices = []
+    for pattern in patterns:
+        rc, out, err = _run(["bash", "-lc", f"for p in {pattern}; do [ -e \"$p\" ] && printf '%s\\n' \"$p\"; done | sort -u"], timeout=3)
+        if rc not in (0, 1):
+            continue
+        for line in out.splitlines():
+            path = line.strip()
+            if path and path not in devices:
+                devices.append(path)
+    return devices
 
 
 
@@ -764,6 +876,16 @@ def sender_control(action):
 def sender_manual_send():
     r = subprocess.run(
         ["/usr/bin/python3", "-c", "import sys; sys.path.insert(0, '/opt/van-traccar'); import sender; raise SystemExit(0 if sender.send_current_position_once() else 1)"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return r.returncode == 0, (r.stderr or r.stdout or "").strip()
+
+
+def sender_test_coordinate_send():
+    r = subprocess.run(
+        ["/usr/bin/python3", "-c", "import sys; sys.path.insert(0, '/opt/van-traccar'); import sender; raise SystemExit(0 if sender.send_test_position_once() else 1)"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1261,12 +1383,9 @@ def factory_reset():
 @app.route("/")
 def index():
     nets = scan_wifi()
-    wifi_ok = wifi_connected()
+    live = live_status_payload()
     wifi_ssid = current_wifi_ssid()
-    hotspot_ok = hotspot_active()
     hotspot_cfg = load_hotspot_cfg()
-    sender = _sender_status()
-    vpn = _vpn_status()
 
     rows = ""
     for ssid, sig, sec in nets:
@@ -1289,11 +1408,11 @@ def index():
         + "<h1 class='h1'>Status</h1>"
         + "<span class='badge'>Diagnose</span>"
         + "</div>"
-        + "<div class='grid'>"
-        + f"<div class='card kpi'><p class='title'>WLAN</p><p class='value'>{'verbunden' if wifi_ok else 'nicht verbunden'}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Hotspot</p><p class='value'>{'aktiv' if hotspot_ok else 'inaktiv'}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Sender</p><p class='value'>{html.escape(sender['state'])}</p></div>"
-        + f"<div class='card kpi'><p class='title'>VPN</p><p class='value'>{html.escape(vpn['state'])}</p></div>"
+        + "<div class='grid' data-live-status-root='1'>"
+        + f"<div class='card kpi'><p class='title'>WLAN</p><p class='value' id='live-wifi-state'>{'verbunden' if live['wifi_connected'] else 'nicht verbunden'}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Hotspot</p><p class='value' id='live-hotspot-state'>{'aktiv' if live['hotspot_active'] else 'inaktiv'}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Sender</p><p class='value' id='live-sender-state'>{html.escape(live['sender_state'])}</p></div>"
+        + f"<div class='card kpi'><p class='title'>VPN</p><p class='value' id='live-vpn-state'>{html.escape(live['vpn_state'])}</p></div>"
         + "</div>"
         + "</div>"
     )
@@ -1442,7 +1561,7 @@ def save():
 @app.route("/traccar/control", methods=["POST"])
 def traccar_control():
     action = request.form.get("action", "").strip().lower()
-    if action not in ["start", "stop", "restart", "manual-send"]:
+    if action not in ["start", "stop", "restart", "manual-send", "test-send"]:
         body = nav("traccar") + "<div class='card'><div class='notice err'>Ungültige Aktion.</div><a class='btn' href='/traccar'>Zurück</a></div>"
         return html_page(body, title="Fehler"), 400
 
@@ -1452,6 +1571,18 @@ def traccar_control():
             nav("traccar")
             + "<div class='card'>"
             + (f"<div class='notice ok'>Aktuelle Position manuell gesendet.</div>" if ok else f"<div class='notice err'>Manuelles Senden fehlgeschlagen.</div>")
+            + (f"<div class='notice'><div class='small mono'>{html.escape(msg)}</div></div>" if msg else "")
+            + "<a class='btn' href='/traccar'>Zurück</a>"
+            + "</div>"
+        )
+        return html_page(body, title="Sender-Steuerung")
+
+    if action == "test-send":
+        ok, msg = sender_test_coordinate_send()
+        body = (
+            nav("traccar")
+            + "<div class='card'>"
+            + (f"<div class='notice ok'>Testkoordinaten erfolgreich gesendet.</div>" if ok else f"<div class='notice err'>Testkoordinaten konnten nicht gesendet werden.</div>")
             + (f"<div class='notice'><div class='small mono'>{html.escape(msg)}</div></div>" if msg else "")
             + "<a class='btn' href='/traccar'>Zurück</a>"
             + "</div>"
@@ -1472,6 +1603,7 @@ def traccar_control():
 @app.route("/traccar")
 def traccar():
     cfg = load_traccar_cfg()
+    live = live_status_payload()
     gps = gps_status()
 
     body = (
@@ -1481,12 +1613,13 @@ def traccar():
         + "<span class='badge'>WLAN-only (soll nicht im Hotspot genutzt werden)</span></div>"
         + "<p class='small'>Einstellungen für den Traccar Client Sender. Änderungen werden in <span class='mono'>/opt/van-traccar/config.json</span> gespeichert.</p>"
         + "<div class='hr'></div>"
-        + "<div class='grid'>"
-        + f"<div class='card kpi'><p class='title'>Fix</p><p class='value'>{html.escape(str(gps['fix']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Letzter TPV</p><p class='value mono'>{html.escape(str(gps['last']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Latitude</p><p class='value mono'>{html.escape(str(gps['lat']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Longitude</p><p class='value mono'>{html.escape(str(gps['lon']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Accuracy (epx)</p><p class='value mono'>{html.escape(str(gps['acc']))}</p></div>"
+        + "<div class='grid' data-live-status-root='1'>"
+        + f"<div class='card kpi'><p class='title'>Fix</p><p class='value' id='live-traccar-fix'>{html.escape(str(gps['fix']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Letzter TPV</p><p class='value mono' id='live-traccar-last'>{html.escape(str(gps['last']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Latitude</p><p class='value mono' id='live-traccar-lat'>{html.escape(str(gps['lat']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Longitude</p><p class='value mono' id='live-traccar-lon'>{html.escape(str(gps['lon']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Accuracy (epx)</p><p class='value mono' id='live-traccar-acc'>{html.escape(str(gps['acc']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>GPS-Geräte</p><p class='value mono' id='live-traccar-devices'>{html.escape(str(live['gps_devices_summary']))}</p></div>"
         + f"<div class='card kpi'><p class='title'>Aktuelle Config</p><p class='value mono'>id={html.escape(cfg['device_id'])}</p><p class='small mono'>url={html.escape(cfg['server_url'])}</p></div>"
         + "</div>"
         + "<div class='hr'></div>"
@@ -1512,7 +1645,9 @@ def traccar():
         + "<button class='btn' name='action' value='stop'>Sender stoppen</button>"
         + "<button class='btn' name='action' value='restart'>Sender neu starten</button>"
         + "<button class='btn' name='action' value='manual-send'>Aktuelle Position manuell senden</button>"
+        + "<button class='btn' name='action' value='test-send'>Testkoordinaten senden</button>"
         + "</form>"
+        + "<div class='notice' style='border-color:#8a6d1d;background:#3a2f0b;color:#f5e6a8'>Der Test sendet einmalig die Koordinaten des Nordpols (90.0 / 0.0) an den Traccar-Server. Damit kannst du prüfen, ob der Client grundsätzlich senden kann, ohne auf ein GPS-Fix warten zu müssen.</div>"
         + "</div>"
         + "</div>"
     )
@@ -1703,27 +1838,100 @@ def gps_signal_quality(gps):
     return {"percent": score, "label": label}
 
 
-@app.route("/status")
-def status_page():
-    data = {
-        "ts_utc": datetime.now(timezone.utc).isoformat(),
-        "internet_ok": _internet_ok(),
-        "vpn": _vpn_status(),
-        "sender": _sender_status(),
-        "gps": _gps_status(),
-        "wifi_connected": wifi_connected(),
-        "hotspot_active": hotspot_active(),
-    }
-    data["sender"].setdefault("last_send_utc", None)
-    data["sender"].setdefault("last_http_code", None)
-    data["sender"].setdefault("note", "no telemetry yet")
+def human_bytes(value):
+    try:
+        num = int(value)
+    except Exception:
+        return str(value or "-")
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(num)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{num} B"
 
-    gps = data["gps"]
-    sender = data["sender"]
+
+def live_status_payload():
+    gps = _gps_status()
+    sender = _sender_status()
+    vpn = _vpn_status()
     state = load_traccar_state()
     queue_size = load_queue_size()
     queue_meta = load_queue_meta()
-    vpn = data["vpn"]
+    health = system_health()
+    watchdog = gps_watchdog(gps)
+    signal = gps_signal_quality(gps)
+    wg_traffic = wg_transfer()
+    wg_handshake = wg_latest_handshake()
+    wg_cfg = load_wg_struct()
+    endpoint_host = wg_endpoint_host(wg_cfg.get("endpoint", ""))
+    endpoint_resolved = wg_resolve_endpoint_ip(endpoint_host) if endpoint_host else "-"
+    usb_devices = detect_serial_gps_devices()
+
+    vpn_policy = load_vpn_policy()
+    updated_last_online = bool(vpn.get("active")) and wg_handshake.get("status") in {"frisch", "alt"}
+    updated_handshake_status = str(wg_handshake.get("status", "")).strip()
+    if vpn_policy.get("last_online") != updated_last_online or vpn_policy.get("last_handshake_status") != updated_handshake_status:
+        vpn_policy["last_online"] = updated_last_online
+        vpn_policy["last_handshake_status"] = updated_handshake_status
+        save_vpn_policy(vpn_policy)
+
+    return {
+        "wifi_connected": wifi_connected(),
+        "hotspot_active": hotspot_active(),
+        "internet_ok": _internet_ok(),
+        "sender_state": sender.get("state", "-"),
+        "vpn_state": vpn.get("state", "-"),
+        "vpn_active": bool(vpn.get("active", False)),
+        "wg_rx": wg_traffic.get("rx", "-"),
+        "wg_tx": wg_traffic.get("tx", "-"),
+        "wg_rx_human": human_bytes(wg_traffic.get("rx", "-")),
+        "wg_tx_human": human_bytes(wg_traffic.get("tx", "-")),
+        "wg_handshake_age": wg_handshake.get("age_text", "-"),
+        "wg_handshake_status": wg_handshake.get("status", "-"),
+        "endpoint_host": endpoint_host or "-",
+        "endpoint_resolved": endpoint_resolved or "-",
+        "queue_size": queue_size,
+        "queue_oldest_ts": queue_meta.get("oldest_ts"),
+        "last_send_utc": state.get("last_send_utc") or "-",
+        "last_position": f"{state.get('last_lat')}, {state.get('last_lon')}" if state.get("last_lat") is not None and state.get("last_lon") is not None else "-",
+        "last_http_code": state.get("last_http_code") if state.get("last_http_code") is not None else "-",
+        "last_error": state.get("last_error") or "-",
+        "gps_fix": gps.get("fix") or "-",
+        "gps_last": gps.get("time") or gps.get("last") or "-",
+        "gps_lat": gps.get("lat") if gps.get("lat") is not None else "-",
+        "gps_lon": gps.get("lon") if gps.get("lon") is not None else "-",
+        "gps_accuracy": gps.get("accuracy_m") if gps.get("accuracy_m") is not None else gps.get("acc") if gps.get("acc") is not None else "-",
+        "gps_signal": f"{signal['percent']} % ({signal['label']})",
+        "gps_satellites": f"{gps.get('satellites_used') or '-'} / {gps.get('satellites_seen') or '-'}",
+        "gps_watchdog_status": watchdog.get("status", "-"),
+        "gps_watchdog_age": watchdog.get("age", "-"),
+        "gps_devices_summary": f"USB: {len(usb_devices)} | gpsd: {len(gps.get('devices') or [])}",
+        "gps_usb_devices": usb_devices,
+        "health_cpu_temp": health.get("cpu_temp_c", "-"),
+        "health_load": health.get("load", "-"),
+        "health_ram": health.get("ram", "-"),
+        "health_uptime": health.get("uptime", "-"),
+    }
+
+
+@app.route("/api/status")
+def api_status():
+    return jsonify(live_status_payload())
+
+
+@app.route("/status")
+def status_page():
+    live = live_status_payload()
+    gps = _gps_status()
+    sender = _sender_status()
+    state = load_traccar_state()
+    queue_size = load_queue_size()
+    queue_meta = load_queue_meta()
+    vpn = _vpn_status()
     health = system_health()
     watchdog = gps_watchdog(gps)
     signal = gps_signal_quality(gps)
@@ -1737,42 +1945,44 @@ def status_page():
         + "<h1 class='h1'>Status</h1>"
         + "<a class='btn' href='/'>Zurück</a>"
         + "</div>"
-        + "<div class='grid'>"
-        + f"<div class='card kpi'><p class='title'>WLAN</p><p class='value'>{'verbunden' if data['wifi_connected'] else 'nicht verbunden'}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Hotspot</p><p class='value'>{'aktiv' if data['hotspot_active'] else 'inaktiv'}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Internet</p><p class='value'>{'ok' if data['internet_ok'] else 'kein Internet'}</p></div>"
-        + f"<div class='card kpi'><p class='title'>VPN</p><p class='value'>{html.escape(str(vpn['state']))}</p><p class='small mono'>Rx: {html.escape(str(wg_traffic.get('rx', '-')))} B | Tx: {html.escape(str(wg_traffic.get('tx', '-')))} B<br>Handshake: {html.escape(str(wg_handshake.get('age_text','-')))} ({html.escape(str(wg_handshake.get('status','-')))})</p></div>"
-        + f"<div class='card kpi'><p class='title'>Sender</p><p class='value'>{html.escape(str(sender['state']))}</p></div><div class='card kpi'><p class='title'>Queue</p><p class='value'>{queue_size}</p></div>"
+        + "<div class='grid' data-live-status-root='1'>"
+        + f"<div class='card kpi'><p class='title'>WLAN</p><p class='value' id='live-wifi-state'>{'verbunden' if live['wifi_connected'] else 'nicht verbunden'}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Hotspot</p><p class='value' id='live-hotspot-state'>{'aktiv' if live['hotspot_active'] else 'inaktiv'}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Internet</p><p class='value' id='live-internet-state'>{'ok' if live['internet_ok'] else 'kein Internet'}</p></div>"
+        + f"<div class='card kpi'><p class='title'>VPN</p><p class='value' id='live-vpn-state'>{html.escape(str(vpn['state']))}</p><p class='small mono'>Rx: <span id='live-vpn-rx'>{html.escape(str(live['wg_rx_human']))}</span> | Tx: <span id='live-vpn-tx'>{html.escape(str(live['wg_tx_human']))}</span><br>Handshake: <span id='live-vpn-handshake-age'>{html.escape(str(wg_handshake.get('age_text','-')))}</span> (<span id='live-vpn-handshake-status'>{html.escape(str(wg_handshake.get('status','-')))}</span>)</p></div>"
+        + f"<div class='card kpi'><p class='title'>Sender</p><p class='value' id='live-sender-state'>{html.escape(str(sender['state']))}</p></div><div class='card kpi'><p class='title'>Queue</p><p class='value' id='live-queue-size'>{queue_size}</p></div>"
         + f"<div class='card kpi'><p class='title'>Queue ältester Punkt</p><p class='value mono'>{html.escape(str(queue_meta['oldest_ts'] if queue_meta['oldest_ts'] is not None else '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Letzte Sendung</p><p class='value mono'>{html.escape(str(state['last_send_utc'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Letzte Position</p><p class='value mono'>{html.escape(str(state['last_lat']))}, {html.escape(str(state['last_lon']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>HTTP Status</p><p class='value mono'>{html.escape(str(state['last_http_code'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Letzter Fehler</p><p class='value mono'>{html.escape(str(state['last_error'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>GPS-Fix</p><p class='value'>{html.escape(str(gps['fix'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Breitengrad</p><p class='value mono'>{html.escape(str(gps['lat'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Längengrad</p><p class='value mono'>{html.escape(str(gps['lon'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>GPS Accuracy</p><p class='value mono'>{html.escape(str(gps['accuracy_m'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>GPS Signalqualität</p><p class='value mono'>{signal['percent']} % ({html.escape(signal['label'])})</p></div>"
-        + f"<div class='card kpi'><p class='title'>Satelliten</p><p class='value mono'>{html.escape(str(gps['satellites_used'] or '-'))} / {html.escape(str(gps['satellites_seen'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>GPS Watchdog</p><p class='value'>{html.escape(str(watchdog['status']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Letzte GPS-Zeit vor</p><p class='value mono'>{html.escape(str(watchdog['age']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Letzte Sendung</p><p class='value mono' id='live-last-send'>{html.escape(str(state['last_send_utc'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Letzte Position</p><p class='value mono' id='live-last-position'>{html.escape(str(state['last_lat']))}, {html.escape(str(state['last_lon']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>HTTP Status</p><p class='value mono' id='live-http-status'>{html.escape(str(state['last_http_code'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Letzter Fehler</p><p class='value mono' id='live-last-error'>{html.escape(str(state['last_error'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>GPS-Fix</p><p class='value' id='live-gps-fix'>{html.escape(str(gps['fix'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Breitengrad</p><p class='value mono' id='live-gps-lat'>{html.escape(str(gps['lat'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Längengrad</p><p class='value mono' id='live-gps-lon'>{html.escape(str(gps['lon'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>GPS Accuracy</p><p class='value mono' id='live-gps-accuracy'>{html.escape(str(gps['accuracy_m'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>GPS Signalqualität</p><p class='value mono' id='live-gps-signal'>{signal['percent']} % ({html.escape(signal['label'])})</p></div>"
+        + f"<div class='card kpi'><p class='title'>Satelliten</p><p class='value mono' id='live-gps-satellites'>{html.escape(str(gps['satellites_used'] or '-'))} / {html.escape(str(gps['satellites_seen'] or '-'))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>GPS Watchdog</p><p class='value' id='live-gps-watchdog'>{html.escape(str(watchdog['status']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Letzte GPS-Zeit vor</p><p class='value mono' id='live-gps-watchdog-age'>{html.escape(str(watchdog['age']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>GPS-Geräte</p><p class='value mono' id='live-gps-devices'>{html.escape(live['gps_devices_summary'])}</p></div>"
         + f"<div class='card kpi'><p class='title'>Tracking-Modus</p><p class='value'>{html.escape(str(state['tracking_mode'] or '-'))}</p></div>"
         + f"<div class='card kpi'><p class='title'>Aktives Intervall</p><p class='value mono'>{html.escape(str(state['active_interval'] or '-'))} s</p></div>"
         + f"<div class='card kpi'><p class='title'>Letzte Bewegungsdistanz</p><p class='value mono'>{html.escape(str(state['movement_distance_m'] or '-'))} m</p></div>"
         + f"<div class='card kpi'><p class='title'>Letzte Sender-Accuracy</p><p class='value mono'>{html.escape(str(state['last_accuracy'] or '-'))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>CPU Temperatur</p><p class='value mono'>{html.escape(str(health['cpu_temp_c']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Load (1/5/15)</p><p class='value mono'>{html.escape(str(health['load']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>RAM</p><p class='value mono'>{html.escape(str(health['ram']))}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Uptime</p><p class='value mono'>{html.escape(str(health['uptime']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>CPU Temperatur</p><p class='value mono' id='live-cpu-temp'>{html.escape(str(health['cpu_temp_c']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Load (1/5/15)</p><p class='value mono' id='live-load'>{html.escape(str(health['load']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>RAM</p><p class='value mono' id='live-ram'>{html.escape(str(health['ram']))}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Uptime</p><p class='value mono' id='live-uptime'>{html.escape(str(health['uptime']))}</p></div>"
         + "</div>"
         + "</div>"
     )
-    return html_page(body, title="Status", refresh_seconds=5)
+    return html_page(body, title="Status")
 # --- /Smart Van: Status Endpoint ---
 
 
 @app.route("/wg")
 def wg_page():
+    live = live_status_payload()
     vpn = _vpn_status()
     wg_show = ""
     if vpn.get("active"):
@@ -1786,6 +1996,7 @@ def wg_page():
     resolved_ip = wg_resolve_endpoint_ip(cfg.get("endpoint", ""))
     endpoint_host = wg_endpoint_host(cfg.get("endpoint", ""))
     transfer = wg_transfer()
+    vpn_policy = load_vpn_policy()
 
     notice = ""
     saved = request.args.get("saved", "").strip()
@@ -1806,13 +2017,13 @@ def wg_page():
         + "<span class='badge'>wg0</span>"
         + "</div>"
         + notice
-        + "<div class='grid'>"
-        + f"<div class='card kpi'><p class='title'>Status</p><p class='value mono'>{html.escape(str(vpn.get('state', '-')))}</p></div>"
+        + "<div class='grid' data-live-status-root='1'>"
+        + f"<div class='card kpi'><p class='title'>Status</p><p class='value mono' id='live-vpn-state'>{html.escape(str(vpn.get('state', '-')))}</p><p class='small mono'>Rx: <span id='live-vpn-rx'>{html.escape(live['wg_rx_human'])}</span> | Tx: <span id='live-vpn-tx'>{html.escape(live['wg_tx_human'])}</span><br>Handshake: <span id='live-vpn-handshake-age'>{html.escape(live['wg_handshake_age'])}</span> (<span id='live-vpn-handshake-status'>{html.escape(live['wg_handshake_status'])}</span>)</p></div>"
         + f"<div class='card kpi'><p class='title'>Config-Datei</p><p class='value mono'>{html.escape(WG_CONF)}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Endpoint Host</p><p class='value mono'>{html.escape(endpoint_host or '-')}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Resolved IP</p><p class='value mono'>{html.escape(resolved_ip)}</p></div>"
-        + f"<div class='card kpi'><p class='title'>Empfangen (Rx)</p><p class='value mono'>{html.escape(str(transfer.get('rx', '-')))} B</p></div>"
-        + f"<div class='card kpi'><p class='title'>Gesendet (Tx)</p><p class='value mono'>{html.escape(str(transfer.get('tx', '-')))} B</p></div>"
+        + f"<div class='card kpi'><p class='title'>Endpoint Host</p><p class='value mono' id='live-endpoint-host'>{html.escape(endpoint_host or '-')}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Resolved IP</p><p class='value mono' id='live-endpoint-resolved'>{html.escape(resolved_ip)}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Empfangen (Rx)</p><p class='value mono' id='live-vpn-rx-copy'>{html.escape(live['wg_rx_human'])}</p></div>"
+        + f"<div class='card kpi'><p class='title'>Gesendet (Tx)</p><p class='value mono' id='live-vpn-tx-copy'>{html.escape(live['wg_tx_human'])}</p></div>"
         + "</div>"
         + "<div class='hr'></div>"
 
@@ -1858,6 +2069,10 @@ def wg_page():
 
         + "<label>PersistentKeepalive</label>"
         + f"<input type='number' name='persistent_keepalive' min='0' max='65535' step='1' value='{html.escape(str(cfg.get('persistent_keepalive','')))}' placeholder='25'>"
+        + "<label><input type='checkbox' name='remember_last_state' style='width:auto;max-width:none;margin-right:8px' "
+        + ("checked" if vpn_policy.get("remember_last_state") else "")
+        + "> Letzten erfolgreichen VPN-Status nach Reboot merken</label>"
+        + "<div class='notice'>Aktiv: Wenn der Tunnel vor Spannungsverlust online war, wird er nach dem Reboot automatisch erneut gestartet. Bleibt nach dem Start innerhalb der Prüffrist kein Handshake aus, wird der Tunnel wieder abgeschaltet und bleibt aus.<br>Inaktiv: Nach jedem Reboot wird der Tunnel einmal automatisch versucht. Bleibt der Handshake aus, wird er wieder abgeschaltet und bleibt aus.</div>"
 
         + "<div style='margin-top:14px'><button class='btn' type='submit'>Formular speichern</button></div>"
         + "</form>"
@@ -1910,6 +2125,9 @@ def wg_save_struct():
         "allowed_ips": request.form.get("allowed_ips", "").strip(),
         "persistent_keepalive": request.form.get("persistent_keepalive", "").strip(),
     }
+    vpn_policy = load_vpn_policy()
+    vpn_policy["remember_last_state"] = request.form.get("remember_last_state") == "on"
+    save_vpn_policy(vpn_policy)
 
     err = []
     if not cfg["private_key"]:
@@ -1955,6 +2173,11 @@ def wg_control_route():
         body = nav("wg") + "<div class='card'><div class='notice err'>Ungültige Aktion.</div><a class='btn' href='/wg'>Zurück</a></div>"
         return html_page(body, title="WireGuard Fehler"), 400
     wg_control(action)
+    if action == "stop":
+        vpn_policy = load_vpn_policy()
+        vpn_policy["last_online"] = False
+        vpn_policy["last_handshake_status"] = "gestoppt"
+        save_vpn_policy(vpn_policy)
     return redirect("/wg?saved=ctl")
 
 

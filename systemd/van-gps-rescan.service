@@ -1,0 +1,12 @@
+[Unit]
+Description=Rescan USB GPS devices for gpsd
+After=network-online.target gpsd.socket
+Wants=network-online.target gpsd.socket
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/van-gps-rescan.sh
+User=root
+
+[Install]
+WantedBy=multi-user.target
